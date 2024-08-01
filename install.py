@@ -8,12 +8,27 @@ from packaging import version as pv
 
 try:
     from modules.paths_internal import models_path
+import subprocess
+import os
+import sys
+from typing import Any
+import packaging
+from tqdm import tqdm
+import urllib.request
+import importlib.metadata as metadata
+from packaging import version as pv
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+try:
+    from modules.paths_internal import models_path
 except:
     try:
         from modules.paths import models_path
     except:
         models_path = os.path.abspath("models")
-
 
 BASE_PATH = os.path.dirname(os.path.realpath(__file__))
 
@@ -21,48 +36,44 @@ req_file = os.path.join(BASE_PATH, "requirements.txt")
 
 models_dir = os.path.join(models_path, "insightface")
 
-# DEPRECATED:
-# models_dir_old = os.path.join(models_path, "roop")
-# if os.path.exists(models_dir_old):
-#     if not os.listdir(models_dir_old) and (not os.listdir(models_dir) or not os.path.exists(models_dir)):
-#         os.rename(models_dir_old, models_dir)
-#     else:
-#         import shutil
-#         for file in os.listdir(models_dir_old):
-#             shutil.move(os.path.join(models_dir_old, file), os.path.join(models_dir, file))
-#         try:
-#             os.rmdir(models_dir_old)
-#         except Exception as e:
-#             print(f"OSError: {e}")
-            
 model_url = "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/inswapper_128.onnx"
 model_name = os.path.basename(model_url)
 model_path = os.path.join(models_dir, model_name)
 
 def pip_install(*args):
-    subprocess.run([sys.executable, "-m", "pip", "install", *args])
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install", *args], check=True)
+        logging.info(f"Successfully installed: {' '.join(args)}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to install: {' '.join(args)}")
+        raise e
 
 def pip_uninstall(*args):
-    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", *args])
-
-def is_installed (
-        package: str, version: str | None = None, strict: bool = True
-):
-    has_package = None
     try:
-        has_package = pkg_resources.get_distribution(package)
-        if has_package is not None:
-            installed_version = has_package.version
-            if (installed_version != version and strict == True) or (pv.parse(installed_version) < pv.parse(version) and strict == False):
+        subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", *args], check=True)
+        logging.info(f"Successfully uninstalled: {' '.join(args)}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to uninstall: {' '.join(args)}")
+        raise e
+
+def is_installed(package: str, version: str | None = None, strict: bool = True) -> bool:
+    try:
+        installed_version = metadata.version(package.split("==")[0].split(">=")[0].strip())
+        if installed_version:
+            installed_version = pv.parse(installed_version)
+            if (installed_version != pv.parse(version) and strict) or (installed_version < pv.parse(version) and not strict):
                 return False
             else:
                 return True
         else:
             return False
-    except Exception as e:
-        print(f"Error: {e}")
+    except metadata.PackageNotFoundError:
+        logging.error(f"Error: {package} is not installed.")
         return False
-    
+    except Exception as e:
+        logging.error(f"An unexpected error occurred while checking {package}: {e}")
+        return False
+
 def download(url, path):
     request = urllib.request.urlopen(url)
     total = int(request.headers.get('Content-Length', 0))
@@ -74,8 +85,6 @@ if not os.path.exists(models_dir):
 
 if not os.path.exists(model_path):
     download(model_url, model_path)
-
-# print("ReActor preheating...", end=' ')
 
 last_device = None
 first_run = False
@@ -101,15 +110,13 @@ with open(req_file) as file:
     try:
         if torch.cuda.is_available():
             cuda_version = torch.version.cuda
-            print(f"CUDA {cuda_version}")
+            logging.info(f"CUDA {cuda_version}")
             if first_run or last_device is None:
                 last_device = "CUDA"
-        elif torch.backends.mps.is_available() or hasattr(torch,'dml') or hasattr(torch,'privateuseone'):
+        elif torch.backends.mps.is_available() or hasattr(torch, 'dml') or hasattr(torch, 'privateuseone'):
             ort = "onnxruntime"
-            # to prevent errors when ORT-GPU is installed but we want ORT instead:
             if first_run:
                 pip_uninstall("onnxruntime", "onnxruntime-gpu")
-            # just in case:
             if last_device == "CUDA" or last_device is None:
                 last_device = "CPU"
         else:
@@ -117,22 +124,21 @@ with open(req_file) as file:
                 last_device = "CPU"
         with open(os.path.join(BASE_PATH, "last_device.txt"), "w") as txt:
             txt.write(last_device)
-        if cuda_version is not None and float(cuda_version)>=12: # CU12
-            if not is_installed(ort,"1.17.1",False):
+        if cuda_version is not None and float(cuda_version) >= 12:  # CU12
+            if not is_installed(ort, "1.17.1", False):
                 install_count += 1
                 pip_uninstall("onnxruntime", "onnxruntime-gpu")
-                pip_install(ort,"--extra-index-url","https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/")
-        elif not is_installed(ort,"1.16.1",False):
+                pip_install(ort, "--extra-index-url", "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/")
+        elif not is_installed(ort, "1.16.1", False):
             install_count += 1
             pip_install(ort, "-U")
     except Exception as e:
-        print(e)
-        print(f"\nERROR: Failed to install {ort} - ReActor won't start")
+        logging.error(f"Failed to install {ort}: {e}")
         raise e
-    # print(f"Device: {last_device}")
-    strict = True
+
     for package in file:
         package_version = None
+        strict = True
         try:
             package = package.strip()
             if "==" in package:
@@ -140,16 +146,12 @@ with open(req_file) as file:
             elif ">=" in package:
                 package_version = package.split('>=')[1]
                 strict = False
-            if not is_installed(package,package_version,strict):
+            if not is_installed(package, package_version, strict):
                 install_count += 1
                 pip_install(package)
         except Exception as e:
-            print(e)
-            print(f"\nERROR: Failed to install {package} - ReActor won't start")
+            logging.error(f"Failed to install {package}: {e}")
             raise e
+
     if install_count > 0:
-        print(f"""
-        +---------------------------------+
-        --- PLEASE, RESTART the Server! ---
-        +---------------------------------+
-        """)
+        logging.info("Please restart the server to apply the changes.")
